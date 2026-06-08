@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { DailyBrief as DailyBriefModel } from "../types";
 import { composeDailyBriefText } from "../lib/briefComposer";
 
@@ -31,6 +31,20 @@ export function DailyBrief({
 }: DailyBriefProps) {
   const [copyState, setCopyState] = useState<"idle" | "done" | "error">("idle");
 
+  useEffect(() => {
+    if (copyState === "idle") {
+      return;
+    }
+
+    const timerId = window.setTimeout(() => {
+      setCopyState("idle");
+    }, 2400);
+
+    return () => {
+      window.clearTimeout(timerId);
+    };
+  }, [copyState]);
+
   if (!brief) {
     return null;
   }
@@ -46,8 +60,12 @@ export function DailyBrief({
       return;
     }
 
-    await navigator.clipboard.writeText(exportText);
-    setCopyState("done");
+    try {
+      await navigator.clipboard.writeText(exportText);
+      setCopyState("done");
+    } catch {
+      setCopyState("error");
+    }
   };
 
   return (

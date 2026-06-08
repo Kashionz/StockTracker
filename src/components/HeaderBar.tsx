@@ -49,6 +49,7 @@ export function HeaderBar({
       <div className="header-actions">
         <div className="mode-switch" aria-label="漲跌配色模式">
           <button
+            aria-pressed={colorMode === "tw"}
             className={colorMode === "tw" ? "is-active" : ""}
             onClick={() => {
               onColorModeChange("tw");
@@ -58,6 +59,7 @@ export function HeaderBar({
             台股色盤
           </button>
           <button
+            aria-pressed={colorMode === "intl"}
             className={colorMode === "intl" ? "is-active" : ""}
             onClick={() => {
               onColorModeChange("intl");

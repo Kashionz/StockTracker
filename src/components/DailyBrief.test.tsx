@@ -40,4 +40,36 @@ describe("DailyBrief", () => {
       expect(screen.getByText("已複製摘要")).toBeInTheDocument();
     });
   });
+
+  it("surfaces an error status when the clipboard write rejects", async () => {
+    const writeText = vi.fn().mockRejectedValue(new Error("denied"));
+
+    Object.defineProperty(window.navigator, "clipboard", {
+      configurable: true,
+      value: {
+        writeText
+      }
+    });
+
+    render(
+      <DailyBrief
+        brief={{
+          sessionLabel: "台股盤前摘要",
+          headline: "測試標題",
+          bullets: ["重點一"],
+          focusSymbols: ["2330"],
+          sentiment: "neutral",
+          updatedAt: "2026-06-08T00:42:00+08:00"
+        }}
+        selectedSymbol={null}
+        selectedStockName={null}
+      />
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "複製摘要文字" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("目前瀏覽器不支援直接複製")).toBeInTheDocument();
+    });
+  });
 });
