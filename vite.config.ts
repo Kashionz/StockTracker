@@ -37,6 +37,13 @@ export default defineConfig(({ mode }) => {
       target: "https://api.stlouisfed.org",
       changeOrigin: true,
       rewrite: (path) => path.replace(/^\/api\/fred/, "")
+    },
+    "/api/sinopac": {
+      // SinoPac (Shioaji) realtime quotes are served by the local Python backend
+      // (server/), which holds the API credentials. No key is exposed to the client.
+      target: env.SINOPAC_BACKEND_URL || "http://127.0.0.1:8001",
+      changeOrigin: true,
+      rewrite: (path) => path.replace(/^\/api\/sinopac/, "")
     }
   };
 
@@ -58,17 +65,6 @@ export default defineConfig(({ mode }) => {
       rewrite: () => "/v1/responses",
       headers: {
         Authorization: `Bearer ${env.OPENAI_API_KEY}`
-      }
-    };
-  }
-
-  if (env.FUGLE_API_KEY) {
-    proxy["/api/fugle"] = {
-      target: "https://api.fugle.tw/marketdata/v1.0/stock",
-      changeOrigin: true,
-      rewrite: (path) => path.replace(/^\/api\/fugle/, ""),
-      headers: {
-        "X-API-KEY": env.FUGLE_API_KEY
       }
     };
   }

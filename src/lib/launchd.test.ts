@@ -48,7 +48,7 @@ describe("launchd", () => {
         BRIEF_WEBHOOK_URL: "https://hooks.slack.com/services/test",
         BRIEF_WEBHOOK_FORMAT: "slack",
         FRED_API_KEY: "fred-test",
-        FUGLE_API_KEY: "fugle-test",
+        SINOPAC_BACKEND_URL: "http://127.0.0.1:8001",
         CUSTOM_VAR: "ignore-me"
       })
     ).toEqual({
@@ -56,7 +56,7 @@ describe("launchd", () => {
       BRIEF_WEBHOOK_URL: "https://hooks.slack.com/services/test",
       FINNHUB_API_KEY: "finnhub-test",
       FRED_API_KEY: "fred-test",
-      FUGLE_API_KEY: "fugle-test",
+      SINOPAC_BACKEND_URL: "http://127.0.0.1:8001",
       HOME: "/Users/kashionz",
       OPENAI_API_KEY: "sk-test",
       PATH: "/opt/homebrew/bin:/usr/bin:/bin"
