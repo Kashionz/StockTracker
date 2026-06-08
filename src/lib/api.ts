@@ -18,6 +18,22 @@ interface FinnhubNewsResponse {
   related?: string;
 }
 
+interface YahooChartResponse {
+  chart?: {
+    result?: Array<{
+      meta?: {
+        regularMarketPrice?: number;
+        chartPreviousClose?: number;
+        previousClose?: number;
+        regularMarketTime?: number;
+      };
+      indicators?: {
+        quote?: Array<{ close?: Array<number | null> }>;
+      };
+    }>;
+  };
+}
+
 interface TwseStockDayResponse {
   Date: string;
   Code: string;
@@ -102,6 +118,8 @@ interface FugleIntradayQuoteResponse {
 export interface LivePayloadOptions {
   fetchImpl?: typeof fetch;
   finnhubApiKey?: string;
+  finnhubBaseUrl?: string;
+  yahooBaseUrl?: string;
   fugleApiKey?: string;
   fugleBaseUrl?: string;
   twseBaseUrl?: string;
@@ -145,7 +163,9 @@ const twNewsAliases: Record<string, string[]> = {
   "3231": ["3231", "緯創", "Wistron"],
   "3711": ["3711", "日月光投控", "日月光", "ASE"]
 };
-const finnhubMacroSymbols: Record<string, string> = {
+// US indices: Finnhub's free tier rejects index symbols, so they are sourced
+// from Yahoo Finance's public chart endpoint instead.
+const yahooMacroSymbols: Record<string, string> = {
   spx: "^GSPC",
   ixic: "^IXIC",
   sox: "^SOX",
@@ -156,14 +176,30 @@ const fredMacroSeries: Record<string, string> = {
   us10y: "DGS10"
 };
 
-function buildFinnhubUrl(pathname: string, params: Record<string, string>) {
-  const url = new URL(`https://finnhub.io/api/v1/${pathname}`);
+function buildFinnhubUrl(
+  baseUrl: string,
+  pathname: string,
+  params: Record<string, string>,
+  apiKey?: string
+) {
+  const normalizedBaseUrl = baseUrl.replace(/\/+$/, "");
+  const searchParams = new URLSearchParams(params);
 
-  for (const [key, value] of Object.entries(params)) {
-    url.searchParams.set(key, value);
+  // When calling through a same-origin proxy the token is injected server-side,
+  // so it is only appended for direct Finnhub calls (legacy VITE_FINNHUB_API_KEY).
+  if (apiKey) {
+    searchParams.set("token", apiKey);
   }
 
-  return url.toString();
+  const queryString = searchParams.toString();
+
+  return `${normalizedBaseUrl}/${pathname}${queryString ? `?${queryString}` : ""}`;
+}
+
+function buildYahooChartUrl(baseUrl: string, symbol: string) {
+  const normalizedBaseUrl = baseUrl.replace(/\/+$/, "");
+
+  return `${normalizedBaseUrl}/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=5d`;
 }
 
 function buildTwseUrl(baseUrl: string, pathname: string) {
@@ -191,16 +227,18 @@ function buildFugleQuoteUrl(baseUrl: string, symbol: string) {
 }
 
 function buildFredSeriesUrl(baseUrl: string, seriesId: string, apiKey: string) {
+  // String concat (not `new URL`) so a relative dev-proxy base like "/api/fred"
+  // works — `new URL` throws on a base without an origin.
   const normalizedBaseUrl = baseUrl.replace(/\/+$/, "");
-  const url = new URL(`${normalizedBaseUrl}/fred/series/observations`);
+  const searchParams = new URLSearchParams({
+    series_id: seriesId,
+    api_key: apiKey,
+    file_type: "json",
+    sort_order: "desc",
+    limit: "5"
+  });
 
-  url.searchParams.set("series_id", seriesId);
-  url.searchParams.set("api_key", apiKey);
-  url.searchParams.set("file_type", "json");
-  url.searchParams.set("sort_order", "desc");
-  url.searchParams.set("limit", "5");
-
-  return url.toString();
+  return `${normalizedBaseUrl}/fred/series/observations?${searchParams.toString()}`;
 }
 
 async function fetchJson<T>(url: string, fetchImpl: typeof fetch, init?: RequestInit): Promise<T> {
@@ -457,27 +495,6 @@ function mergeFugleQuote(
   };
 }
 
-function mergeFinnhubMacro(
-  baseMacro: DashboardPayload["macros"][number],
-  quote: FinnhubQuoteResponse
-): DashboardPayload["macros"][number] {
-  if (!quote.c) {
-    return baseMacro;
-  }
-
-  const changePct =
-    quote.pc === 0 ? baseMacro.changePct : Number((((quote.c - quote.pc) / quote.pc) * 100).toFixed(2));
-
-  return {
-    ...baseMacro,
-    value: formatMacroValue(baseMacro.key, quote.c),
-    changePct,
-    sparkline: replaceSparklineTail(baseMacro.sparkline, quote.c),
-    updatedAt: quote.t ? new Date(quote.t * 1000).toISOString() : baseMacro.updatedAt,
-    delayTag: "即時"
-  };
-}
-
 function mergeNews(symbol: string, items: FinnhubNewsResponse[]): RawNewsItem[] {
   return items.slice(0, 2).map((item, index) => ({
     id: `${symbol}-${index}-${item.datetime}`,
@@ -701,7 +718,8 @@ function mergeTwseMisMacro(
 
 async function mergeFinnhubData(
   payload: DashboardPayload,
-  finnhubApiKey: string,
+  finnhubBaseUrl: string,
+  finnhubApiKey: string | undefined,
   fetchImpl: typeof fetch
 ): Promise<boolean> {
   let hasMergedData = false;
@@ -710,7 +728,7 @@ async function mergeFinnhubData(
   const quoteResults = await Promise.allSettled(
     liveUsSymbols.map(async (symbol) => {
       const quote = await fetchJson<FinnhubQuoteResponse>(
-        buildFinnhubUrl("quote", { symbol, token: finnhubApiKey }),
+        buildFinnhubUrl(finnhubBaseUrl, "quote", { symbol }, finnhubApiKey),
         fetchImpl
       );
 
@@ -735,47 +753,15 @@ async function mergeFinnhubData(
 
   payload.quotes = [...quotesBySymbol.values()];
 
-  const macroResults = await Promise.allSettled(
-    Object.entries(finnhubMacroSymbols).map(async ([macroKey, symbol]) => {
-      const quote = await fetchJson<FinnhubQuoteResponse>(
-        buildFinnhubUrl("quote", { symbol, token: finnhubApiKey }),
-        fetchImpl
-      );
-
-      return { macroKey, quote };
-    })
-  );
-
-  const macrosByKey = new Map(payload.macros.map((macro) => [macro.key, macro]));
-
-  for (const result of macroResults) {
-    if (result.status !== "fulfilled") {
-      continue;
-    }
-
-    const baseMacro = macrosByKey.get(result.value.macroKey);
-
-    if (!baseMacro) {
-      continue;
-    }
-
-    hasMergedData = true;
-    macrosByKey.set(result.value.macroKey, mergeFinnhubMacro(baseMacro, result.value.quote));
-  }
-
-  payload.macros = [...macrosByKey.values()];
+  // US indices come from Yahoo Finance (mergeYahooData); Finnhub's free tier
+  // rejects index symbols, so they are intentionally not fetched here.
 
   const newsResults = await Promise.allSettled(
     liveNewsSymbols.map(async (symbol) => {
       const to = new Date().toISOString().slice(0, 10);
       const from = new Date(Date.now() - 1000 * 60 * 60 * 24 * 2).toISOString().slice(0, 10);
       const items = await fetchJson<FinnhubNewsResponse[]>(
-        buildFinnhubUrl("company-news", {
-          symbol,
-          from,
-          to,
-          token: finnhubApiKey
-        }),
+        buildFinnhubUrl(finnhubBaseUrl, "company-news", { symbol, from, to }, finnhubApiKey),
         fetchImpl
       );
 
@@ -791,6 +777,83 @@ async function mergeFinnhubData(
     hasMergedData = true;
     payload.news = [...mergedNews, ...payload.news].slice(0, 8);
   }
+
+  return hasMergedData;
+}
+
+function mergeYahooMacro(
+  baseMacro: DashboardPayload["macros"][number],
+  response: YahooChartResponse
+): DashboardPayload["macros"][number] {
+  const result = response.chart?.result?.[0];
+  const price = result?.meta?.regularMarketPrice;
+
+  if (!result || typeof price !== "number" || !Number.isFinite(price)) {
+    return baseMacro;
+  }
+
+  const previousClose = result.meta?.chartPreviousClose ?? result.meta?.previousClose;
+  const changePct =
+    typeof previousClose === "number" && previousClose !== 0
+      ? Number((((price - previousClose) / previousClose) * 100).toFixed(2))
+      : baseMacro.changePct;
+  const closes = (result.indicators?.quote?.[0]?.close ?? []).filter(
+    (value): value is number => typeof value === "number" && Number.isFinite(value)
+  );
+  const sparkline =
+    closes.length >= 2 ? closes.slice(-5) : replaceSparklineTail(baseMacro.sparkline, price);
+  const epochMs = result.meta?.regularMarketTime ? result.meta.regularMarketTime * 1000 : Number.NaN;
+  const updatedAt = Number.isFinite(epochMs) ? new Date(epochMs).toISOString() : baseMacro.updatedAt;
+
+  return {
+    ...baseMacro,
+    value: formatMacroValue(baseMacro.key, price),
+    changePct,
+    sparkline,
+    updatedAt,
+    delayTag: "延遲 15 分"
+  };
+}
+
+async function mergeYahooData(
+  payload: DashboardPayload,
+  yahooBaseUrl: string,
+  fetchImpl: typeof fetch
+): Promise<boolean> {
+  let hasMergedData = false;
+  const macrosByKey = new Map(payload.macros.map((macro) => [macro.key, macro]));
+
+  const results = await Promise.allSettled(
+    Object.entries(yahooMacroSymbols).map(async ([macroKey, symbol]) => {
+      const response = await fetchJson<YahooChartResponse>(
+        buildYahooChartUrl(yahooBaseUrl, symbol),
+        fetchImpl
+      );
+
+      return { macroKey, response };
+    })
+  );
+
+  for (const result of results) {
+    if (result.status !== "fulfilled") {
+      continue;
+    }
+
+    const baseMacro = macrosByKey.get(result.value.macroKey);
+
+    if (!baseMacro) {
+      continue;
+    }
+
+    const nextMacro = mergeYahooMacro(baseMacro, result.value.response);
+
+    if (nextMacro !== baseMacro) {
+      hasMergedData = true;
+      macrosByKey.set(result.value.macroKey, nextMacro);
+    }
+  }
+
+  payload.macros = [...macrosByKey.values()];
 
   return hasMergedData;
 }
@@ -1043,71 +1106,120 @@ async function mergeGoogleNewsData(
   return true;
 }
 
+// Isolates a single provider's failure so one bad source (e.g. a redirecting
+// endpoint or an unexpected non-JSON body) cannot discard data that other
+// providers already merged or collapse the whole load to mock.
+async function runProvider(merge: () => Promise<boolean>): Promise<boolean> {
+  try {
+    return await merge();
+  } catch {
+    return false;
+  }
+}
+
+// Blank env overrides (e.g. `VITE_TWSE_BASE_URL=` in .env.local) must read as
+// unset so the dev proxy defaults still apply. Plain `??` keeps the empty string
+// and silently disables the provider.
+export function cleanEnv(value: string | undefined): string | undefined {
+  return value && value.trim() !== "" ? value : undefined;
+}
+
 export async function loadLiveDashboardPayload(
   options: LivePayloadOptions = {}
 ): Promise<DashboardPayload | null> {
   const fetchImpl = options.fetchImpl ?? fetch;
-  const finnhubApiKey = options.finnhubApiKey ?? import.meta.env.VITE_FINNHUB_API_KEY;
-  const fugleApiKey = options.fugleApiKey ?? import.meta.env.VITE_FUGLE_API_KEY;
+  const finnhubDirectKey = options.finnhubApiKey ?? cleanEnv(import.meta.env.VITE_FINNHUB_API_KEY);
+  const finnhubBaseUrl =
+    options.finnhubBaseUrl ??
+    cleanEnv(import.meta.env.VITE_FINNHUB_BASE_URL) ??
+    (import.meta.env.MODE === "development"
+      ? "/api/finnhub"
+      : finnhubDirectKey
+        ? "https://finnhub.io/api/v1"
+        : undefined);
+  // The token is only attached for direct browser → Finnhub calls; same-origin
+  // proxies (dev /api/finnhub or a custom VITE_FINNHUB_BASE_URL) inject it server-side.
+  const finnhubApiKey =
+    finnhubBaseUrl === "https://finnhub.io/api/v1" ? finnhubDirectKey : undefined;
+  const yahooBaseUrl =
+    options.yahooBaseUrl ??
+    cleanEnv(import.meta.env.VITE_YAHOO_BASE_URL) ??
+    (import.meta.env.MODE === "development" ? "/api/yahoo" : undefined);
+  const fugleApiKey = options.fugleApiKey ?? cleanEnv(import.meta.env.VITE_FUGLE_API_KEY);
   const fugleBaseUrl =
     options.fugleBaseUrl ??
-    import.meta.env.VITE_FUGLE_BASE_URL ??
+    cleanEnv(import.meta.env.VITE_FUGLE_BASE_URL) ??
     (import.meta.env.MODE === "development" ? "/api/fugle" : undefined);
   const twseBaseUrl =
     options.twseBaseUrl ??
-    import.meta.env.VITE_TWSE_BASE_URL ??
+    cleanEnv(import.meta.env.VITE_TWSE_BASE_URL) ??
     (import.meta.env.MODE === "development" ? "/api/twse" : undefined);
   const twseMisBaseUrl =
     options.twseMisBaseUrl ??
-    import.meta.env.VITE_TWSE_MIS_BASE_URL ??
+    cleanEnv(import.meta.env.VITE_TWSE_MIS_BASE_URL) ??
     (import.meta.env.MODE === "development" ? "/api/twse-mis" : undefined);
   const googleNewsBaseUrl =
     options.googleNewsBaseUrl ??
-    import.meta.env.VITE_GOOGLE_NEWS_BASE_URL ??
+    cleanEnv(import.meta.env.VITE_GOOGLE_NEWS_BASE_URL) ??
     (import.meta.env.MODE === "development" ? "/api/google-news" : undefined);
   const sentimentApiUrl =
     options.sentimentApiUrl ??
-    import.meta.env.VITE_SENTIMENT_API_URL ??
+    cleanEnv(import.meta.env.VITE_SENTIMENT_API_URL) ??
     (import.meta.env.MODE === "development" ? "/api/ai-sentiment" : undefined);
   const sentimentModel =
     options.sentimentModel ??
-    import.meta.env.VITE_SENTIMENT_MODEL ??
+    cleanEnv(import.meta.env.VITE_SENTIMENT_MODEL) ??
     "gpt-5-mini";
-  const fredApiKey = options.fredApiKey ?? import.meta.env.VITE_FRED_API_KEY;
+  const fredApiKey = options.fredApiKey ?? cleanEnv(import.meta.env.VITE_FRED_API_KEY);
   const fredBaseUrl =
     options.fredBaseUrl ??
-    import.meta.env.VITE_FRED_BASE_URL ??
+    cleanEnv(import.meta.env.VITE_FRED_BASE_URL) ??
     (import.meta.env.MODE === "development" ? "/api/fred" : undefined);
 
   const basePayload: DashboardPayload = JSON.parse(JSON.stringify(mockDashboardPayload));
   let hasMergedData = false;
 
-  if (finnhubApiKey) {
-    hasMergedData = (await mergeFinnhubData(basePayload, finnhubApiKey, fetchImpl)) || hasMergedData;
+  if (finnhubBaseUrl) {
+    hasMergedData =
+      (await runProvider(() =>
+        mergeFinnhubData(basePayload, finnhubBaseUrl, finnhubApiKey, fetchImpl)
+      )) || hasMergedData;
+  }
+
+  if (yahooBaseUrl) {
+    hasMergedData =
+      (await runProvider(() => mergeYahooData(basePayload, yahooBaseUrl, fetchImpl))) ||
+      hasMergedData;
   }
 
   if (twseBaseUrl) {
-    hasMergedData = (await mergeTwseData(basePayload, twseBaseUrl, fetchImpl)) || hasMergedData;
+    hasMergedData =
+      (await runProvider(() => mergeTwseData(basePayload, twseBaseUrl, fetchImpl))) || hasMergedData;
   }
 
   if (twseMisBaseUrl) {
     hasMergedData =
-      (await mergeTwseMisData(basePayload, twseMisBaseUrl, fetchImpl)) || hasMergedData;
+      (await runProvider(() => mergeTwseMisData(basePayload, twseMisBaseUrl, fetchImpl))) ||
+      hasMergedData;
   }
 
   if (fugleBaseUrl) {
     hasMergedData =
-      (await mergeFugleData(basePayload, fugleBaseUrl, fugleApiKey, fetchImpl)) || hasMergedData;
+      (await runProvider(() => mergeFugleData(basePayload, fugleBaseUrl, fugleApiKey, fetchImpl))) ||
+      hasMergedData;
   }
 
   if (googleNewsBaseUrl) {
     hasMergedData =
-      (await mergeGoogleNewsData(basePayload, googleNewsBaseUrl, fetchImpl)) || hasMergedData;
+      (await runProvider(() => mergeGoogleNewsData(basePayload, googleNewsBaseUrl, fetchImpl))) ||
+      hasMergedData;
   }
 
   if (fredBaseUrl && fredApiKey) {
     hasMergedData =
-      (await mergeFredMacroData(basePayload, fredBaseUrl, fredApiKey, fetchImpl)) || hasMergedData;
+      (await runProvider(() =>
+        mergeFredMacroData(basePayload, fredBaseUrl, fredApiKey, fetchImpl)
+      )) || hasMergedData;
   }
 
   if (!hasMergedData) {

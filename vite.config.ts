@@ -20,6 +20,14 @@ export default defineConfig(({ mode }) => {
       changeOrigin: true,
       rewrite: (path) => path.replace(/^\/api\/twse-mis/, "")
     },
+    "/api/yahoo": {
+      target: "https://query1.finance.yahoo.com",
+      changeOrigin: true,
+      rewrite: (path) => path.replace(/^\/api\/yahoo/, ""),
+      headers: {
+        "User-Agent": "Mozilla/5.0"
+      }
+    },
     "/api/google-news": {
       target: "https://news.google.com",
       changeOrigin: true,
@@ -31,6 +39,17 @@ export default defineConfig(({ mode }) => {
       rewrite: (path) => path.replace(/^\/api\/fred/, "")
     }
   };
+
+  if (env.FINNHUB_API_KEY) {
+    proxy["/api/finnhub"] = {
+      target: "https://finnhub.io/api/v1",
+      changeOrigin: true,
+      rewrite: (path) => path.replace(/^\/api\/finnhub/, ""),
+      headers: {
+        "X-Finnhub-Token": env.FINNHUB_API_KEY
+      }
+    };
+  }
 
   if (env.OPENAI_API_KEY) {
     proxy["/api/ai-sentiment"] = {
