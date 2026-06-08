@@ -113,35 +113,35 @@ function App() {
 
   return (
     <main className="dashboard-shell" data-color-mode={colorMode}>
-      <div className="dashboard-frame">
-        <HeaderBar
-          colorMode={colorMode}
-          isLoading={loading}
-          lastUpdatedAt={snapshot?.lastUpdatedAt ?? null}
-          onRefresh={() => {
-            void refreshSnapshot(true);
-          }}
-          onColorModeChange={setColorMode}
-          source={snapshot?.source ?? "mock"}
-        />
+      <HeaderBar
+        colorMode={colorMode}
+        isLoading={loading}
+        lastUpdatedAt={snapshot?.lastUpdatedAt ?? null}
+        onRefresh={() => {
+          void refreshSnapshot(true);
+        }}
+        onColorModeChange={setColorMode}
+        source={snapshot?.source ?? "mock"}
+      />
 
-        {errorMessage ? <div className="inline-alert">{errorMessage}</div> : null}
-
-        <MarketStrip indicators={snapshot?.marketStrip ?? []} />
-
-        <DailyBrief
-          brief={snapshot?.dailyBrief ?? null}
+      <div className="dashboard-body">
+        <WatchlistPanel
+          sections={snapshot?.watchSections ?? []}
           selectedSymbol={selectedStock?.symbol ?? null}
-          selectedStockName={selectedStock?.name ?? null}
+          onSelectSymbol={(symbol) => {
+            setSelectedSymbol((current) => (current === symbol ? null : symbol));
+          }}
         />
 
-        <section className="dashboard-main-grid">
-          <WatchlistPanel
-            sections={snapshot?.watchSections ?? []}
+        <div className="dashboard-main">
+          {errorMessage ? <div className="inline-alert">{errorMessage}</div> : null}
+
+          <MarketStrip indicators={snapshot?.marketStrip ?? []} />
+
+          <DailyBrief
+            brief={snapshot?.dailyBrief ?? null}
             selectedSymbol={selectedStock?.symbol ?? null}
-            onSelectSymbol={(symbol) => {
-              setSelectedSymbol((current) => (current === symbol ? null : symbol));
-            }}
+            selectedStockName={selectedStock?.name ?? null}
           />
 
           <NewsFeed
@@ -149,15 +149,15 @@ function App() {
             selectedSymbol={selectedStock?.symbol ?? null}
             selectedStockName={selectedStock?.name ?? null}
           />
-        </section>
 
-        <ImpactMap
-          chains={impactChains}
-          selectedSymbol={selectedStock?.symbol ?? null}
-          selectedStockName={selectedStock?.name ?? null}
-        />
+          <ImpactMap
+            chains={impactChains}
+            selectedSymbol={selectedStock?.symbol ?? null}
+            selectedStockName={selectedStock?.name ?? null}
+          />
 
-        <SchedulePanel brief={snapshot?.dailyBrief ?? null} />
+          <SchedulePanel brief={snapshot?.dailyBrief ?? null} />
+        </div>
       </div>
     </main>
   );

@@ -51,15 +51,6 @@ export function WatchlistPanel({
               <p>{section.description}</p>
             </div>
 
-            <div className="watch-table-head" aria-hidden="true">
-              <span>代號 / 名稱</span>
-              <span>現價</span>
-              <span>漲跌幅</span>
-              <span>成交量</span>
-              <span>迷你走勢</span>
-              <span>狀態</span>
-            </div>
-
             <div className="watch-items">
               {section.items.map((item) => {
                 const selected = item.symbol === selectedSymbol;
@@ -75,31 +66,25 @@ export function WatchlistPanel({
                     }}
                     type="button"
                   >
-                    <div className="watch-col identity">
-                      <div>
-                        <div className="watch-item-symbol">{item.symbol}</div>
-                        <div className="watch-item-name">{item.name}</div>
+                    <div className="watch-row-top">
+                      <div className="watch-id">
+                        <span className="watch-item-symbol">{item.symbol}</span>
+                        <span className="watch-item-name">{item.name}</span>
+                      </div>
+
+                      <div className="watch-quote">
+                        <span className="watch-price">{formatPrice(item.symbol, item.price)}</span>
+                        <span className={`trend-pill trend-${item.trend}`}>{formatChange(item.changePct)}</span>
                       </div>
                     </div>
 
-                    <div className="watch-col price">{formatPrice(item.symbol, item.price)}</div>
-
-                    <div className="watch-col change">
-                      <span className={`trend-pill trend-${item.trend}`}>{formatChange(item.changePct)}</span>
-                    </div>
-
-                    <div className="watch-col volume">
-                      <span>{formatVolume(item.volume)}</span>
-                      <small>{item.category}</small>
-                    </div>
-
-                    <div className="watch-col sparkline">
+                    <div className="watch-row-bottom">
                       <Sparkline points={item.sparkline} trend={item.trend} />
-                    </div>
 
-                    <div className="watch-col status">
-                      <span>{item.delayTag}</span>
-                      <small>{item.market}</small>
+                      <div className="watch-meta">
+                        <span>{formatVolume(item.volume)} · {item.category}</span>
+                        <span>{item.delayTag} · {item.market}</span>
+                      </div>
                     </div>
                   </button>
                 );
