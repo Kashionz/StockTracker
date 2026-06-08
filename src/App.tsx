@@ -11,6 +11,7 @@ import { NewsFeed } from "./components/NewsFeed";
 import { SchedulePanel } from "./components/SchedulePanel";
 import { WatchlistPanel } from "./components/WatchlistPanel";
 import { loadDashboardSnapshot } from "./lib/dashboardLoader";
+import { getRefreshIntervalMs } from "./lib/marketHours";
 import type { DashboardSnapshot } from "./types";
 
 type ColorMode = "tw" | "intl";
@@ -46,7 +47,6 @@ function App() {
       }
 
       setSnapshot(nextSnapshot);
-      setSelectedSymbol((current) => current ?? null);
       setErrorMessage(null);
     } catch {
       if (mountedRef.current) {
@@ -60,14 +60,24 @@ function App() {
   };
 
   useEffect(() => {
-    void refreshSnapshot();
+    let timerId: number | undefined;
 
-    const timerId = window.setInterval(() => {
-      void refreshSnapshot();
-    }, 1000 * 60 * 3);
+    // Self-rescheduling timer: refreshes every minute while a market is open and
+    // every 15 minutes otherwise, re-evaluating the cadence after each cycle.
+    const scheduleNext = () => {
+      timerId = window.setTimeout(async () => {
+        await refreshSnapshot();
+        scheduleNext();
+      }, getRefreshIntervalMs(new Date()));
+    };
+
+    void refreshSnapshot();
+    scheduleNext();
 
     return () => {
-      window.clearInterval(timerId);
+      if (timerId !== undefined) {
+        window.clearTimeout(timerId);
+      }
     };
   }, []);
 
@@ -125,8 +135,6 @@ function App() {
           selectedStockName={selectedStock?.name ?? null}
         />
 
-        <SchedulePanel brief={snapshot?.dailyBrief ?? null} />
-
         <section className="dashboard-main-grid">
           <WatchlistPanel
             sections={snapshot?.watchSections ?? []}
@@ -148,6 +156,8 @@ function App() {
           selectedSymbol={selectedStock?.symbol ?? null}
           selectedStockName={selectedStock?.name ?? null}
         />
+
+        <SchedulePanel brief={snapshot?.dailyBrief ?? null} />
       </div>
     </main>
   );
