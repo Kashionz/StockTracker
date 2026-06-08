@@ -3,6 +3,7 @@ import { watchStocks } from "../data/watchlists";
 import type { DashboardPayload, RawNewsItem, RawQuote } from "../types";
 import { enrichNewsSentimentWithAi } from "./aiSentiment";
 import { compareDateTimeDesc } from "./dateTime";
+import { isTwSessionOpen } from "./marketHours";
 
 interface FinnhubQuoteResponse {
   c: number;
@@ -16,6 +17,20 @@ interface FinnhubNewsResponse {
   source: string;
   datetime: number;
   related?: string;
+}
+
+interface SinopacSnapshot {
+  code: string;
+  close?: number;
+  change_rate?: number;
+  total_volume?: number;
+  ts?: string;
+}
+
+interface SinopacSnapshotResponse {
+  updatedAt?: string;
+  quotes?: SinopacSnapshot[];
+  indices?: SinopacSnapshot[];
 }
 
 interface YahooChartResponse {
@@ -101,27 +116,12 @@ interface FredObservationsResponse {
   }>;
 }
 
-interface FugleIntradayQuoteResponse {
-  symbol?: string;
-  name?: string;
-  previousClose?: number;
-  closePrice?: number;
-  lastPrice?: number;
-  changePercent?: number;
-  total?: {
-    tradeVolume?: number;
-  };
-  isClose?: boolean;
-  lastUpdated?: number;
-}
-
 export interface LivePayloadOptions {
   fetchImpl?: typeof fetch;
   finnhubApiKey?: string;
   finnhubBaseUrl?: string;
   yahooBaseUrl?: string;
-  fugleApiKey?: string;
-  fugleBaseUrl?: string;
+  sinopacBaseUrl?: string;
   twseBaseUrl?: string;
   twseMisBaseUrl?: string;
   googleNewsBaseUrl?: string;
@@ -171,6 +171,8 @@ const yahooMacroSymbols: Record<string, string> = {
   sox: "^SOX",
   vix: "^VIX"
 };
+// SinoPac (Shioaji) index code for the TAIEX weighted index (Contracts.Indexs.TSE["001"]).
+const sinopacTaiexCode = "001";
 const fredMacroSeries: Record<string, string> = {
   "usd-twd": "DEXTAUS",
   us10y: "DGS10"
@@ -209,6 +211,18 @@ function buildTwseUrl(baseUrl: string, pathname: string) {
   return `${normalizedBaseUrl}/${normalizedPath}`;
 }
 
+function buildSinopacUrl(baseUrl: string, symbols: string[], indices: string[]) {
+  // String concat (relative-safe) so a dev-proxy base like "/api/sinopac" works.
+  const normalizedBaseUrl = baseUrl.replace(/\/+$/, "");
+  const searchParams = new URLSearchParams({ symbols: symbols.join(",") });
+
+  if (indices.length > 0) {
+    searchParams.set("indices", indices.join(","));
+  }
+
+  return `${normalizedBaseUrl}/snapshots?${searchParams.toString()}`;
+}
+
 function buildTwseMisUrl(baseUrl: string, channels: string[]) {
   const normalizedBaseUrl = baseUrl.replace(/\/+$/, "");
   const queryString = new URLSearchParams({
@@ -218,12 +232,6 @@ function buildTwseMisUrl(baseUrl: string, channels: string[]) {
   }).toString();
 
   return `${normalizedBaseUrl}/stock/api/getStockInfo.jsp?${queryString}`;
-}
-
-function buildFugleQuoteUrl(baseUrl: string, symbol: string) {
-  const normalizedBaseUrl = baseUrl.replace(/\/+$/, "");
-
-  return `${normalizedBaseUrl}/intraday/quote/${symbol}`;
 }
 
 function buildFredSeriesUrl(baseUrl: string, seriesId: string, apiKey: string) {
@@ -332,14 +340,6 @@ function formatMacroValue(macroKey: string, value: number): string {
   }
 
   return formatThousands(value);
-}
-
-function convertEpochMicroToIso(timestamp?: number): string | null {
-  if (!Number.isFinite(timestamp)) {
-    return null;
-  }
-
-  return new Date(Math.trunc(Number(timestamp) / 1000)).toISOString();
 }
 
 function replaceSparklineTail(series: number[], nextValue: number): number[] {
@@ -471,27 +471,6 @@ function mergeQuote(baseQuote: RawQuote, quote: FinnhubQuoteResponse): RawQuote 
     changePct,
     updatedAt: quote.t ? new Date(quote.t * 1000).toISOString() : baseQuote.updatedAt,
     delayTag: "即時"
-  };
-}
-
-function mergeFugleQuote(
-  baseQuote: RawQuote,
-  quote: FugleIntradayQuoteResponse
-): RawQuote {
-  const price = quote.lastPrice ?? quote.closePrice ?? baseQuote.price;
-  const volume = quote.total?.tradeVolume ?? baseQuote.volume;
-  const changePct =
-    typeof quote.changePercent === "number" ? Number(quote.changePercent.toFixed(2)) : baseQuote.changePct;
-  const updatedAt = convertEpochMicroToIso(quote.lastUpdated) ?? baseQuote.updatedAt;
-
-  return {
-    ...baseQuote,
-    price,
-    changePct,
-    volume,
-    sparkline: replaceSparklineTail(baseQuote.sparkline, price),
-    updatedAt,
-    delayTag: quote.isClose ? "盤後" : "即時"
   };
 }
 
@@ -858,51 +837,102 @@ async function mergeYahooData(
   return hasMergedData;
 }
 
-async function mergeFugleData(
+function mergeSinopacQuote(
+  baseQuote: RawQuote,
+  snap: SinopacSnapshot,
+  taiwanSessionOpen: boolean
+): RawQuote {
+  const price = typeof snap.close === "number" && snap.close > 0 ? snap.close : baseQuote.price;
+  const changePct =
+    typeof snap.change_rate === "number" ? Number(snap.change_rate.toFixed(2)) : baseQuote.changePct;
+  const volume = typeof snap.total_volume === "number" ? snap.total_volume : baseQuote.volume;
+
+  return {
+    ...baseQuote,
+    price,
+    changePct,
+    volume,
+    sparkline: replaceSparklineTail(baseQuote.sparkline, price),
+    updatedAt: snap.ts ?? baseQuote.updatedAt,
+    delayTag: taiwanSessionOpen ? "即時" : "盤後"
+  };
+}
+
+function mergeSinopacMacro(
+  baseMacro: DashboardPayload["macros"][number],
+  snap: SinopacSnapshot,
+  taiwanSessionOpen: boolean
+): DashboardPayload["macros"][number] {
+  if (typeof snap.close !== "number" || !Number.isFinite(snap.close) || snap.close <= 0) {
+    return baseMacro;
+  }
+
+  const changePct =
+    typeof snap.change_rate === "number" ? Number(snap.change_rate.toFixed(2)) : baseMacro.changePct;
+
+  return {
+    ...baseMacro,
+    value: formatThousands(snap.close),
+    changePct,
+    sparkline: replaceSparklineTail(baseMacro.sparkline, snap.close),
+    updatedAt: snap.ts ?? baseMacro.updatedAt,
+    delayTag: taiwanSessionOpen ? "即時" : "盤後"
+  };
+}
+
+async function mergeSinopacData(
   payload: DashboardPayload,
-  fugleBaseUrl: string,
-  fugleApiKey: string | undefined,
+  sinopacBaseUrl: string,
   fetchImpl: typeof fetch
 ): Promise<boolean> {
-  let hasMergedData = false;
-  const quotesBySymbol = new Map(payload.quotes.map((quote) => [quote.symbol, quote]));
-  const requestInit =
-    fugleApiKey
-      ? {
-          headers: {
-            "X-API-KEY": fugleApiKey
-          }
-        }
-      : undefined;
-
-  const quoteResults = await Promise.allSettled(
-    liveTwSymbols.map(async (symbol) => {
-      const quote = await fetchJson<FugleIntradayQuoteResponse>(
-        buildFugleQuoteUrl(fugleBaseUrl, symbol),
-        fetchImpl,
-        requestInit
-      );
-
-      return { symbol, quote };
-    })
+  const response = await fetchJson<SinopacSnapshotResponse>(
+    buildSinopacUrl(sinopacBaseUrl, liveTwSymbols, [sinopacTaiexCode]),
+    fetchImpl
   );
 
-  for (const result of quoteResults) {
-    if (result.status !== "fulfilled") {
-      continue;
-    }
+  let hasMergedData = false;
+  const taiwanSessionOpen = isTwSessionOpen(new Date());
 
-    const baseQuote = quotesBySymbol.get(result.value.symbol);
+  const quotesBySymbol = new Map(payload.quotes.map((quote) => [quote.symbol, quote]));
+  const snapsByCode = new Map(
+    (response.quotes ?? []).filter((snap) => snap.code).map((snap) => [snap.code, snap])
+  );
 
-    if (!baseQuote) {
+  for (const symbol of liveTwSymbols) {
+    const baseQuote = quotesBySymbol.get(symbol);
+    const snap = snapsByCode.get(symbol);
+
+    if (!baseQuote || !snap || typeof snap.close !== "number" || snap.close <= 0) {
       continue;
     }
 
     hasMergedData = true;
-    quotesBySymbol.set(result.value.symbol, mergeFugleQuote(baseQuote, result.value.quote));
+    quotesBySymbol.set(symbol, mergeSinopacQuote(baseQuote, snap, taiwanSessionOpen));
   }
 
   payload.quotes = [...quotesBySymbol.values()];
+
+  const taiexSnap = (response.indices ?? []).find((snap) => snap.code === sinopacTaiexCode);
+
+  if (taiexSnap) {
+    let macroUpdated = false;
+
+    payload.macros = payload.macros.map((macro) => {
+      if (macro.key !== "taiex") {
+        return macro;
+      }
+
+      const nextMacro = mergeSinopacMacro(macro, taiexSnap, taiwanSessionOpen);
+
+      if (nextMacro !== macro) {
+        macroUpdated = true;
+      }
+
+      return nextMacro;
+    });
+
+    hasMergedData = macroUpdated || hasMergedData;
+  }
 
   return hasMergedData;
 }
@@ -1145,11 +1175,10 @@ export async function loadLiveDashboardPayload(
     options.yahooBaseUrl ??
     cleanEnv(import.meta.env.VITE_YAHOO_BASE_URL) ??
     (import.meta.env.MODE === "development" ? "/api/yahoo" : undefined);
-  const fugleApiKey = options.fugleApiKey ?? cleanEnv(import.meta.env.VITE_FUGLE_API_KEY);
-  const fugleBaseUrl =
-    options.fugleBaseUrl ??
-    cleanEnv(import.meta.env.VITE_FUGLE_BASE_URL) ??
-    (import.meta.env.MODE === "development" ? "/api/fugle" : undefined);
+  const sinopacBaseUrl =
+    options.sinopacBaseUrl ??
+    cleanEnv(import.meta.env.VITE_SINOPAC_BASE_URL) ??
+    (import.meta.env.MODE === "development" ? "/api/sinopac" : undefined);
   const twseBaseUrl =
     options.twseBaseUrl ??
     cleanEnv(import.meta.env.VITE_TWSE_BASE_URL) ??
@@ -1203,9 +1232,11 @@ export async function loadLiveDashboardPayload(
       hasMergedData;
   }
 
-  if (fugleBaseUrl) {
+  // SinoPac (Shioaji) is the primary realtime source for Taiwan stocks and TAIEX;
+  // running it after TWSE lets its realtime values overwrite the TWSE EOD fallback.
+  if (sinopacBaseUrl) {
     hasMergedData =
-      (await runProvider(() => mergeFugleData(basePayload, fugleBaseUrl, fugleApiKey, fetchImpl))) ||
+      (await runProvider(() => mergeSinopacData(basePayload, sinopacBaseUrl, fetchImpl))) ||
       hasMergedData;
   }
 

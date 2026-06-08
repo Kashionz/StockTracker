@@ -1,0 +1,14 @@
+[project]
+name = "stocktracker-sinopac-server"
+version = "0.1.0"
+description = "SinoPac (Shioaji) realtime market-data backend for StockTracker"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "shioaji>=1.2",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "python-dotenv>=1.0",
+]
+
+[tool.uv]
+package = false

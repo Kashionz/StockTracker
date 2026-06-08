@@ -681,95 +681,70 @@ describe("api", () => {
     expect(payload?.macros.find((macro) => macro.key === "vix")?.value).toBe("21.51");
   });
 
-  it("merges Fugle realtime quotes for Taiwan watchlist symbols when configured", async () => {
-    const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input);
+  it("merges SinoPac realtime snapshots for Taiwan stocks and TAIEX", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-08T10:15:00+08:00")); // TW session open -> "即時"
 
-      if (url.endsWith("/intraday/quote/2330")) {
-        expect(init?.headers).toMatchObject({
-          "X-API-KEY": "fugle-demo"
-        });
+    try {
+      const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
 
-        return new Response(
-          JSON.stringify({
-            symbol: "2330",
-            name: "台積電",
-            previousClose: 915,
-            lastPrice: 922,
-            closePrice: 922,
-            changePercent: 0.77,
-            total: {
-              tradeVolume: 182345
-            },
-            isClose: false,
-            lastUpdated: 1780869600000000
-          }),
-          { status: 200 }
-        );
-      }
+        if (url.includes("/snapshots")) {
+          return new Response(
+            JSON.stringify({
+              updatedAt: "2026-06-08T10:15:00+08:00",
+              quotes: [
+                {
+                  code: "2330",
+                  close: 1185,
+                  change_rate: 1.72,
+                  total_volume: 23145,
+                  ts: "2026-06-08T02:15:00.000Z"
+                },
+                {
+                  code: "2454",
+                  close: 1402,
+                  change_rate: -0.5,
+                  total_volume: 8000,
+                  ts: "2026-06-08T02:15:00.000Z"
+                }
+              ],
+              indices: [
+                { code: "001", close: 24010.5, change_rate: -0.42, ts: "2026-06-08T02:15:00.000Z" }
+              ]
+            }),
+            { status: 200 }
+          );
+        }
 
-      if (url.endsWith("/intraday/quote/2454")) {
-        return new Response(
-          JSON.stringify({
-            symbol: "2454",
-            name: "聯發科",
-            previousClose: 1275,
-            lastPrice: 1291,
-            closePrice: 1291,
-            changePercent: 1.25,
-            total: {
-              tradeVolume: 11775
-            },
-            isClose: false,
-            lastUpdated: 1780869600000000
-          }),
-          { status: 200 }
-        );
-      }
+        return new Response("not found", { status: 404 });
+      }) as typeof fetch;
 
-      if (/\/intraday\/quote\/(2317|2303|2308|2382|3231|3711)$/.test(url)) {
-        return new Response(
-          JSON.stringify({
-            lastPrice: 100,
-            closePrice: 100,
-            previousClose: 100,
-            changePercent: 0,
-            total: {
-              tradeVolume: 1
-            },
-            isClose: false,
-            lastUpdated: 1780869600000000
-          }),
-          { status: 200 }
-        );
-      }
+      const payload = await loadLiveDashboardPayload({
+        fetchImpl,
+        finnhubApiKey: "",
+        twseBaseUrl: "",
+        twseMisBaseUrl: "",
+        googleNewsBaseUrl: "",
+        sinopacBaseUrl: "https://sinopac.example.com"
+      } as never);
 
-      return new Response("not found", { status: 404 });
-    }) as typeof fetch;
-
-    const payload = await loadLiveDashboardPayload({
-      fetchImpl,
-      finnhubApiKey: "",
-      twseBaseUrl: "",
-      twseMisBaseUrl: "",
-      googleNewsBaseUrl: "",
-      fugleApiKey: "fugle-demo",
-      fugleBaseUrl: "https://api.fugle.tw/marketdata/v1.0/stock"
-    } as never);
-
-    expect(payload).not.toBeNull();
-    expect(payload?.quotes.find((quote) => quote.symbol === "2330")).toMatchObject({
-      price: 922,
-      changePct: 0.77,
-      volume: 182345,
-      delayTag: "即時",
-      updatedAt: "2026-06-07T22:00:00.000Z"
-    });
-    expect(payload?.quotes.find((quote) => quote.symbol === "2454")).toMatchObject({
-      price: 1291,
-      changePct: 1.25,
-      volume: 11775,
-      delayTag: "即時"
-    });
+      expect(payload).not.toBeNull();
+      expect(payload?.quotes.find((quote) => quote.symbol === "2330")).toMatchObject({
+        price: 1185,
+        changePct: 1.72,
+        volume: 23145,
+        delayTag: "即時",
+        updatedAt: "2026-06-08T02:15:00.000Z"
+      });
+      expect(payload?.macros.find((macro) => macro.key === "taiex")).toMatchObject({
+        value: "24,010.50",
+        changePct: -0.42,
+        delayTag: "即時"
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
+
 });
