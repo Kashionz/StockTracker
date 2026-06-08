@@ -67,6 +67,20 @@ export function SchedulePanel({ brief }: SchedulePanelProps) {
   }, [history]);
 
   useEffect(() => {
+    if (!copiedEntryId) {
+      return;
+    }
+
+    const timerId = window.setTimeout(() => {
+      setCopiedEntryId(null);
+    }, 2400);
+
+    return () => {
+      window.clearTimeout(timerId);
+    };
+  }, [copiedEntryId]);
+
+  useEffect(() => {
     if (!brief) {
       return;
     }
@@ -135,8 +149,12 @@ export function SchedulePanel({ brief }: SchedulePanelProps) {
       return;
     }
 
-    await navigator.clipboard.writeText(entry.text);
-    setCopiedEntryId(entry.id);
+    try {
+      await navigator.clipboard.writeText(entry.text);
+      setCopiedEntryId(entry.id);
+    } catch {
+      setCopiedEntryId(null);
+    }
   };
 
   const handleRequestNotifications = async () => {

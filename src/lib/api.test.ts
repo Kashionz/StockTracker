@@ -1,6 +1,18 @@
 import { describe, expect, it, vi } from "vitest";
-import { loadLiveDashboardPayload } from "./api";
+import { cleanEnv, loadLiveDashboardPayload } from "./api";
 import { buildDashboardSnapshot } from "./marketTransformer";
+
+describe("cleanEnv", () => {
+  it("treats blank env overrides as unset so dev proxy defaults can apply", () => {
+    // Regression: `.env.local` ships empty VITE_*_BASE_URL lines. With `??` an
+    // empty string was kept and disabled the provider; it must read as unset.
+    expect(cleanEnv("")).toBeUndefined();
+    expect(cleanEnv("   ")).toBeUndefined();
+    expect(cleanEnv(undefined)).toBeUndefined();
+    expect(cleanEnv("/api/twse")).toBe("/api/twse");
+    expect(cleanEnv("https://proxy.example.com")).toBe("https://proxy.example.com");
+  });
+});
 
 describe("api", () => {
   it("returns null when no live provider is configured", async () => {
@@ -129,6 +141,62 @@ describe("api", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("keeps other providers' merged data when one provider fails", async () => {
+    // Regression: a throwing provider (here TWSE MIS) must not discard data that
+    // other providers already merged, nor collapse the whole load to mock.
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.endsWith("/exchangeReport/STOCK_DAY_ALL")) {
+        return new Response(
+          JSON.stringify([
+            {
+              Date: "1150605",
+              Code: "2330",
+              Name: "台積電",
+              TradeVolume: "43403895",
+              TradeValue: "0",
+              OpeningPrice: "2395.0000",
+              HighestPrice: "2405.0000",
+              LowestPrice: "2350.0000",
+              ClosingPrice: "2365.0000",
+              Change: "-20.0000",
+              Transaction: "364351"
+            }
+          ]),
+          { status: 200 }
+        );
+      }
+
+      if (url.endsWith("/exchangeReport/MI_INDEX")) {
+        return new Response(JSON.stringify([]), { status: 200 });
+      }
+
+      if (url.endsWith("/opendata/t187ap04_L")) {
+        return new Response(JSON.stringify([]), { status: 200 });
+      }
+
+      // TWSE MIS responds with a redirect-to-HTML in some environments, which
+      // makes the JSON parse throw. Simulate that failure here.
+      if (url.includes("/stock/api/getStockInfo.jsp")) {
+        return new Response("<html>not json</html>", { status: 200 });
+      }
+
+      return new Response("not found", { status: 404 });
+    }) as typeof fetch;
+
+    const payload = await loadLiveDashboardPayload({
+      fetchImpl,
+      finnhubApiKey: "",
+      twseBaseUrl: "https://proxy.example.com/v1",
+      twseMisBaseUrl: "https://proxy.example.com",
+      googleNewsBaseUrl: ""
+    } as never);
+
+    expect(payload).not.toBeNull();
+    expect(payload?.quotes.find((quote) => quote.symbol === "2330")?.price).toBe(2365);
   });
 
   it("merges Chinese RSS news into the dashboard payload", async () => {
@@ -429,33 +497,18 @@ describe("api", () => {
     expect(payload?.news.some((item) => item.symbols.includes("AVGO"))).toBe(true);
   });
 
-  it("merges live macro indicators from Finnhub and FRED when configured", async () => {
+  it("merges live macro indicators from FRED, without requesting Finnhub indices", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-06-08T09:00:00+08:00"));
+
+    const requestedQuoteSymbols: string[] = [];
 
     try {
       const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
         const url = new URL(String(input));
 
         if (url.pathname.endsWith("/quote")) {
-          const symbol = url.searchParams.get("symbol") ?? "";
-
-          if (symbol === "^GSPC") {
-            return new Response(JSON.stringify({ c: 5342.18, pc: 5300.04, t: 1780869600 }), { status: 200 });
-          }
-
-          if (symbol === "^IXIC") {
-            return new Response(JSON.stringify({ c: 18011.22, pc: 17910.11, t: 1780869600 }), { status: 200 });
-          }
-
-          if (symbol === "^SOX") {
-            return new Response(JSON.stringify({ c: 5288.42, pc: 5230.15, t: 1780869600 }), { status: 200 });
-          }
-
-          if (symbol === "^VIX") {
-            return new Response(JSON.stringify({ c: 13.82, pc: 14.3, t: 1780869600 }), { status: 200 });
-          }
-
+          requestedQuoteSymbols.push(url.searchParams.get("symbol") ?? "");
           return new Response(JSON.stringify({ c: 100, pc: 98, t: 1780869600 }), { status: 200 });
         }
 
@@ -504,23 +557,9 @@ describe("api", () => {
       } as never);
 
       expect(payload).not.toBeNull();
-      expect(payload?.macros.find((macro) => macro.key === "spx")).toMatchObject({
-        value: "5,342.18",
-        changePct: 0.8,
-        delayTag: "即時"
-      });
-      expect(payload?.macros.find((macro) => macro.key === "ixic")).toMatchObject({
-        value: "18,011.22",
-        delayTag: "即時"
-      });
-      expect(payload?.macros.find((macro) => macro.key === "sox")).toMatchObject({
-        value: "5,288.42",
-        delayTag: "即時"
-      });
-      expect(payload?.macros.find((macro) => macro.key === "vix")).toMatchObject({
-        value: "13.82",
-        delayTag: "即時"
-      });
+      // Indices come from Yahoo now; Finnhub must only be asked for equity symbols.
+      expect(requestedQuoteSymbols).not.toContain("^GSPC");
+      expect(requestedQuoteSymbols).not.toContain("^VIX");
       expect(payload?.macros.find((macro) => macro.key === "usd-twd")).toMatchObject({
         value: "32.18",
         delayTag: "每日",
@@ -534,6 +573,112 @@ describe("api", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("fetches FRED macros through a relative dev-proxy base URL", async () => {
+    // Regression: buildFredSeriesUrl used `new URL()`, which throws on a relative
+    // base like "/api/fred", so FRED silently never ran behind the dev proxy.
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.includes("series_id=DEXTAUS")) {
+        return new Response(
+          JSON.stringify({
+            observations: [
+              { date: "2026-05-28", value: "31.36" },
+              { date: "2026-05-29", value: "31.37" }
+            ]
+          }),
+          { status: 200 }
+        );
+      }
+
+      if (url.includes("series_id=DGS10")) {
+        return new Response(
+          JSON.stringify({
+            observations: [
+              { date: "2026-06-03", value: "4.49" },
+              { date: "2026-06-04", value: "4.47" }
+            ]
+          }),
+          { status: 200 }
+        );
+      }
+
+      return new Response("not found", { status: 404 });
+    }) as typeof fetch;
+
+    const payload = await loadLiveDashboardPayload({
+      fetchImpl,
+      finnhubApiKey: "",
+      twseBaseUrl: "",
+      googleNewsBaseUrl: "",
+      fredBaseUrl: "/api/fred",
+      fredApiKey: "demo"
+    });
+
+    expect(payload).not.toBeNull();
+    expect(payload?.macros.find((macro) => macro.key === "usd-twd")?.value).toBe("31.37");
+    expect(payload?.macros.find((macro) => macro.key === "us10y")?.value).toBe("4.47%");
+  });
+
+  it("merges US index quotes from Yahoo Finance when Finnhub cannot", async () => {
+    const makeChart = (price: number, prevClose: number, closes: number[]) =>
+      new Response(
+        JSON.stringify({
+          chart: {
+            result: [
+              {
+                meta: {
+                  regularMarketPrice: price,
+                  chartPreviousClose: prevClose,
+                  regularMarketTime: 1780693236
+                },
+                indicators: { quote: [{ close: closes }] }
+              }
+            ]
+          }
+        }),
+        { status: 200 }
+      );
+
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.includes("/chart/%5EGSPC")) {
+        return makeChart(7383.74, 7580.06, [7500, 7520, 7480, 7580.06, 7383.74]);
+      }
+
+      if (url.includes("/chart/%5EIXIC")) {
+        return makeChart(20011.22, 19800.1, [19500, 19600, 19700, 19800.1, 20011.22]);
+      }
+
+      if (url.includes("/chart/%5ESOX")) {
+        return makeChart(5300.5, 5250.0, [5200, 5220, 5240, 5250, 5300.5]);
+      }
+
+      if (url.includes("/chart/%5EVIX")) {
+        return makeChart(21.51, 16.05, [16.05, 15.77, 16.06, 15.4, 21.51]);
+      }
+
+      return new Response("not found", { status: 404 });
+    }) as typeof fetch;
+
+    const payload = await loadLiveDashboardPayload({
+      fetchImpl,
+      finnhubApiKey: "",
+      twseBaseUrl: "",
+      googleNewsBaseUrl: "",
+      yahooBaseUrl: "https://yahoo.example.com"
+    });
+
+    expect(payload).not.toBeNull();
+    expect(payload?.macros.find((macro) => macro.key === "spx")).toMatchObject({
+      value: "7,383.74",
+      changePct: -2.59,
+      delayTag: "延遲 15 分"
+    });
+    expect(payload?.macros.find((macro) => macro.key === "vix")?.value).toBe("21.51");
   });
 
   it("merges Fugle realtime quotes for Taiwan watchlist symbols when configured", async () => {

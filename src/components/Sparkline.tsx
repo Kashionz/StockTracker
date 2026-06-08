@@ -6,6 +6,10 @@ interface SparklineProps {
 }
 
 export function Sparkline({ points, trend }: SparklineProps) {
+  if (points.length === 0) {
+    return null;
+  }
+
   const min = Math.min(...points);
   const max = Math.max(...points);
   const range = max - min || 1;
@@ -18,7 +22,12 @@ export function Sparkline({ points, trend }: SparklineProps) {
     .join(" ");
 
   return (
-    <svg className={`sparkline sparkline-${trend}`} viewBox="0 0 100 100" preserveAspectRatio="none">
+    <svg
+      aria-hidden="true"
+      className={`sparkline sparkline-${trend}`}
+      viewBox="0 0 100 100"
+      preserveAspectRatio="none"
+    >
       <path d={path} fill="none" pathLength={100} strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
